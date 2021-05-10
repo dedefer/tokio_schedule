@@ -18,14 +18,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     spawn(weekly);
 
     let every_30_seconds = every(30).seconds() // by default chrono::Local timezone
-        .perform(|| async { println!("Every minute at 00'th and 30'th second") })
+        .perform(|| async { println!("Every minute at 00'th and 30'th second") });
     spawn(every_30_seconds);
 
     let every_30_minutes = every(30).minutes().at(20).in_timezone(&Utc)
-        .perform(|| async { println!("Every 30 minutes at 20'th second") })
+        .perform(|| async { println!("Every 30 minutes at 20'th second") });
+    spawn(every_30_minutes);
 
     let every_hour = every(1).hour().at(10, 30).in_timezone(&Utc)
-        .perform(|| async { println!("Every hour at :10:30") })
+        .perform(|| async { println!("Every hour at :10:30") });
+    spawn(every_hour);
 
     let every_day = every(1).day().at(10, 00, 00)
         .in_timezone(&Utc).perform(|| async { println!("I'm scheduled!") });
@@ -490,18 +492,14 @@ impl<TZ> Job for EveryWeekDayAt<TZ>
             let nanos = self.second as i64 * 1_000_000_000 - (now.second() as i64 * 1_000_000_000 + now.nanosecond() as i64);
             let minutes = self.minute as i64 - now.minute() as i64;
             let hours = self.hour as i64 - now.hour() as i64;
-            dbg!(nanos / 1_000_000_000);
-            (dbg!(hours) * 60  + dbg!(minutes)) * 60 * 1_000_000_000 + nanos
+            (hours * 60  + minutes) * 60 * 1_000_000_000 + nanos
         };
 
         let interval_nanos = {
             let skip_days =
                 self.day.weekday.number_from_monday() as i32 - now.weekday().number_from_monday() as i32;
 
-            let skip_days = if skip_days < 0 || (skip_days == 0 && offset_nanos <= 0) {
-                skip_days + 7
-            } else { skip_days };
-            dbg!(skip_days)
+            if skip_days < 0 || (skip_days == 0 && offset_nanos <= 0) { skip_days + 7 } else { skip_days }
         } as i64 * 24 * 60 * 60 * 1_000_000_000;
 
         Duration::from_nanos((interval_nanos + offset_nanos) as u64)
