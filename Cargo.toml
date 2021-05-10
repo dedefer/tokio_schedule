@@ -1,0 +1,19 @@
+[package]
+name = "tokio_schedule"
+version = "0.1.0"
+authors = ["dedefer <ddf1998@gmail.com>"]
+edition = "2018"
+readme = "README.md"
+license-file = "LICENSE"
+keywords = ["async", "tokio", "schedule", "cron"]
+categories = ["asynchronous", "concurrency", "date-and-time"]
+repository = "https://github.com/dedefer/tokio_schedule"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+chrono = "0.4"
+tokio = { version = "1", features = ["time"] }
+
+[dev-dependencies]
+regex = "1.5.4"
