@@ -12,13 +12,17 @@ It is built on tokio (version 1) and chrono lib
 use std::error::Error;
 use chrono::{Utc, Weekday};
 use tokio::spawn;
-use tokio_schedule::{every, every_week, Job};
+use tokio_schedule::{every, Job};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let weekly = every_week(Weekday::Mon).at(12, 00, 00)
+    let weekly = every(1).week().on(Weekday::Mon).at(12, 00, 00)
         .in_timezone(&Utc).perform(|| async { println!("Every week job") });
     spawn(weekly);
+
+    let even_weekly = every(2).weeks().on(Weekday::Mon).at(12, 00, 00)
+        .in_timezone(&Utc).perform(|| async { println!("Every even week job") });
+    spawn(even_weekly);
 
     let every_30_seconds = every(30).seconds() // by default chrono::Local timezone
         .perform(|| async { println!("Every minute at 00'th and 30'th second") });
