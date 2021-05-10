@@ -1,6 +1,6 @@
 [package]
 name = "tokio_schedule"
-version = "0.1.1"
+version = "0.2.0"
 authors = ["dedefer <ddf1998@gmail.com>"]
 edition = "2018"
 readme = "README.md"
@@ -19,3 +19,4 @@ tokio = { version = "1", features = ["time"] }
 
 [dev-dependencies]
 regex = "1.5.4"
+tokio = { version = "1", features = ["full"] }

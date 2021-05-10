@@ -9,13 +9,17 @@ It is built on tokio (version 1) and chrono lib
 use std::error::Error;
 use chrono::{Utc, Weekday};
 use tokio::spawn;
-use tokio_schedule::{every, every_week, Job};
+use tokio_schedule::{every, Job};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let weekly = every_week(Weekday::Mon).at(12, 00, 00)
+    let weekly = every(1).week().on(Weekday::Mon).at(12, 00, 00)
         .in_timezone(&Utc).perform(|| async { println!("Every week job") });
     spawn(weekly);
+
+    let even_weekly = every(2).weeks().on(Weekday::Mon).at(12, 00, 00)
+        .in_timezone(&Utc).perform(|| async { println!("Every even week job") });
+    spawn(even_weekly);
 
     let every_30_seconds = every(30).seconds() // by default chrono::Local timezone
         .perform(|| async { println!("Every minute at 00'th and 30'th second") });
@@ -129,12 +133,6 @@ pub trait Job: Sized + Sync {
 /// It is entrypoint for periodic jobs.
 pub fn every(period: u32) -> Every { Every { step: period } }
 
-/// This function creates EveryWeekDay struct.
-/// It is entrypoint for weekly jobs.
-pub fn every_week(weekday: Weekday) -> EveryWeekDay<Local> {
-    EveryWeekDay { tz: Local, weekday }
-}
-
 /// This is a builder for periodic jobs
 #[derive(Debug, Clone)]
 pub struct Every {
@@ -161,6 +159,11 @@ impl Every {
         EveryDay { step: self.step, tz: Local }
     }
     pub fn days(self) -> EveryDay<Local> { self.day() }
+
+    pub fn week(self) -> EveryWeekDay<Local> {
+        EveryWeekDay { step: self.step, tz: Local, weekday: Weekday::Mon }
+    }
+    pub fn weeks(self) -> EveryWeekDay<Local> { self.week() }
 }
 
 #[derive(Debug, Clone)]
@@ -298,8 +301,7 @@ impl<TZ> Job for EveryHour<TZ>
     fn time_to_sleep_at(&self, now: &DateTime<TZ>) -> Duration {
         EveryHourAt {
             hour: self.clone(),
-            minute: 00,
-            second: 00,
+            minute: 00, second: 00,
         }.time_to_sleep_at(now)
     }
 
@@ -371,9 +373,7 @@ impl<TZ> Job for EveryDay<TZ>
     fn time_to_sleep_at(&self, now: &DateTime<TZ>) -> Duration {
         EveryDayAt {
             day: self.clone(),
-            hour: 00,
-            minute: 00,
-            second: 00,
+            hour: 00, minute: 00, second: 00,
         }.time_to_sleep_at(now)
     }
 
@@ -424,6 +424,7 @@ impl<TZ> Job for EveryDayAt<TZ>
 pub struct EveryWeekDay<TZ>
     where TZ: Clone + TimeZone + Send + Sync,
 {
+    step: u32,
     weekday: Weekday,
     tz: TZ,
 }
@@ -432,12 +433,16 @@ impl<TZ> EveryWeekDay<TZ>
     where TZ: Clone + TimeZone + Send + Sync,
 {
     pub fn at(self, hour: u32, minute: u32, second: u32) -> EveryWeekDayAt<TZ> {
-        EveryWeekDayAt { day: self, hour, minute, second }
+        EveryWeekDayAt { week: self, hour, minute, second }
+    }
+
+    pub fn on(self, weekday: Weekday) -> EveryWeekDay<TZ> {
+        EveryWeekDay { weekday, ..self }
     }
 
     pub fn in_timezone<NewTZ>(self, new_tz: &NewTZ) -> EveryWeekDay<NewTZ>
         where NewTZ: Clone + TimeZone + Send + Sync,
-    { EveryWeekDay { weekday: self.weekday, tz: new_tz.clone() } }
+    { EveryWeekDay { step: self.step, weekday: self.weekday, tz: new_tz.clone() } }
 }
 
 impl<TZ> Job for EveryWeekDay<TZ>
@@ -447,10 +452,8 @@ impl<TZ> Job for EveryWeekDay<TZ>
 
     fn time_to_sleep_at(&self, now: &DateTime<TZ>) -> Duration {
         EveryWeekDayAt {
-            day: self.clone(),
-            hour: 00,
-            minute: 00,
-            second: 00,
+            week: self.clone(),
+            hour: 00, minute: 00, second: 00,
         }.time_to_sleep_at(now)
     }
 
@@ -461,7 +464,7 @@ impl<TZ> Job for EveryWeekDay<TZ>
 pub struct EveryWeekDayAt<TZ>
     where TZ: Clone + TimeZone + Send + Sync,
 {
-    day: EveryWeekDay<TZ>,
+    week: EveryWeekDay<TZ>,
     hour: u32,
     minute: u32,
     second: u32,
@@ -470,11 +473,15 @@ pub struct EveryWeekDayAt<TZ>
 impl<TZ> EveryWeekDayAt<TZ>
     where TZ: Clone + TimeZone + Send + Sync,
 {
+    pub fn on(self, weekday: Weekday) -> EveryWeekDayAt<TZ> {
+        EveryWeekDayAt { week: self.week.on(weekday), ..self }
+    }
+
     pub fn in_timezone<NewTZ>(self, new_tz: &NewTZ) -> EveryWeekDayAt<NewTZ>
         where NewTZ: Clone + TimeZone + Send + Sync,
     {
         EveryWeekDayAt {
-            day: self.day.in_timezone(new_tz),
+            week: self.week.in_timezone(new_tz),
             hour: self.hour,
             minute: self.minute,
             second: self.second,
@@ -496,16 +503,27 @@ impl<TZ> Job for EveryWeekDayAt<TZ>
         };
 
         let interval_nanos = {
-            let skip_days =
-                self.day.weekday.number_from_monday() as i32 - now.weekday().number_from_monday() as i32;
+            let current_week = now.iso_week().week();
+            let current_week_in_cycle = current_week % self.week.step;
+            let skip_in_week =
+                self.week.weekday.number_from_monday() as i32 - now.weekday().number_from_monday() as i32;
 
-            if skip_days < 0 || (skip_days == 0 && offset_nanos <= 0) { skip_days + 7 } else { skip_days }
+            if
+                (skip_in_week > 0 && current_week_in_cycle > 0) ||
+                (skip_in_week == 0 && (
+                    current_week_in_cycle == 0 && offset_nanos <= 0 || current_week_in_cycle > 0
+                )) || (skip_in_week < 0)
+            {
+                skip_in_week + 7 * (self.week.step - current_week_in_cycle) as i32
+            } else {
+                skip_in_week
+            }
         } as i64 * 24 * 60 * 60 * 1_000_000_000;
 
         Duration::from_nanos((interval_nanos + offset_nanos) as u64)
     }
 
-    fn timezone(&self) -> &Self::TZ { &self.day.tz }
+    fn timezone(&self) -> &Self::TZ { &self.week.tz }
 }
 
 #[cfg(test)]
@@ -515,7 +533,7 @@ mod tests {
     use chrono::{DateTime, Utc, NaiveDate, Weekday};
     use regex::Regex;
 
-    use crate::{Job, every, every_week};
+    use crate::{Job, every};
 
 
     #[test]
@@ -667,27 +685,208 @@ mod tests {
     #[test]
     fn every_weekday() {
         assert_eq!(
-            every_week(Weekday::Wed).in_timezone(&Utc)
+            every(1).week().on(Weekday::Wed).in_timezone(&Utc)
                 .time_to_sleep_at(&dt(00, 00, 01)).as_secs(),
             "6d 23h 59m 59s".secs()
         );
 
         assert_eq!(
-            every_week(Weekday::Thu).at(10, 00, 00).in_timezone(&Utc)
+            every(1).week().on(Weekday::Thu).at(10, 00, 00).in_timezone(&Utc)
                 .time_to_sleep_at(&dt(10, 00, 00)).as_secs(),
             "1d".secs()
         );
 
         assert_eq!(
-            every_week(Weekday::Wed).at(10, 00, 00).in_timezone(&Utc)
+            every(1).week().on(Weekday::Wed).at(10, 00, 00).in_timezone(&Utc)
                 .time_to_sleep_at(&dt(10, 00, 00)).as_secs(),
             "7d".secs()
         );
 
         assert_eq!(
-            every_week(Weekday::Mon).at(10, 00, 00).in_timezone(&Utc)
+            every(1).week().on(Weekday::Mon).at(10, 00, 00).in_timezone(&Utc)
                 .time_to_sleep_at(&dt(10, 00, 00)).as_secs(),
             "5d".secs()
+        );
+
+        assert_eq!(
+            every(4).weeks().on(Weekday::Wed).at(10, 00, 00).in_timezone(&Utc)
+                .time_to_sleep_at(&DateTime::from_utc(
+                    // 2'nd week in cycle, Tue
+                    NaiveDate::from_ymd(2021, 02, 02).and_hms(09, 00, 00),
+                    Utc
+                )).as_secs(),
+            "3w 1d 1h".secs()
+        );
+
+        assert_eq!(
+            every(4).weeks().on(Weekday::Wed).at(10, 00, 00).in_timezone(&Utc)
+                .time_to_sleep_at(&DateTime::from_utc(
+                    // 2'nd week in cycle, Tue
+                    NaiveDate::from_ymd(2021, 02, 02).and_hms(11, 00, 00),
+                    Utc
+                )).as_secs(),
+            "3w 23h".secs()
+        );
+
+        assert_eq!(
+            every(4).weeks().on(Weekday::Wed).at(10, 00, 00).in_timezone(&Utc)
+                .time_to_sleep_at(&DateTime::from_utc(
+                    // 2'nd week in cycle, Tue
+                    NaiveDate::from_ymd(2021, 02, 02).and_hms(10, 00, 00),
+                    Utc
+                )).as_secs(),
+            "3w 1d".secs()
+        );
+
+        assert_eq!(
+            every(4).weeks().on(Weekday::Mon).at(10, 00, 00).in_timezone(&Utc)
+                .time_to_sleep_at(&DateTime::from_utc(
+                    // 2'nd week in cycle, Tue
+                    NaiveDate::from_ymd(2021, 02, 02).and_hms(09, 00, 00),
+                    Utc
+                )).as_secs(),
+            "2w 6d 1h".secs()
+        );
+
+        assert_eq!(
+            every(4).weeks().on(Weekday::Mon).at(10, 00, 00).in_timezone(&Utc)
+                .time_to_sleep_at(&DateTime::from_utc(
+                    // 2'nd week in cycle, Tue
+                    NaiveDate::from_ymd(2021, 02, 02).and_hms(11, 00, 00),
+                    Utc
+                )).as_secs(),
+            "2w 5d 23h".secs()
+        );
+
+        assert_eq!(
+            every(4).weeks().on(Weekday::Mon).at(10, 00, 00).in_timezone(&Utc)
+                .time_to_sleep_at(&DateTime::from_utc(
+                    // 2'nd week in cycle, Tue
+                    NaiveDate::from_ymd(2021, 02, 02).and_hms(10, 00, 00),
+                    Utc
+                )).as_secs(),
+            "2w 6d".secs()
+        );
+
+        assert_eq!(
+            every(4).weeks().on(Weekday::Tue).at(10, 00, 00).in_timezone(&Utc)
+                .time_to_sleep_at(&DateTime::from_utc(
+                    // 2'nd week in cycle, Tue
+                    NaiveDate::from_ymd(2021, 02, 02).and_hms(09, 00, 00),
+                    Utc
+                )).as_secs(),
+            "3w 1h".secs()
+        );
+
+        assert_eq!(
+            every(4).weeks().on(Weekday::Tue).at(10, 00, 00).in_timezone(&Utc)
+                .time_to_sleep_at(&DateTime::from_utc(
+                    // 2'nd week in cycle, Tue
+                    NaiveDate::from_ymd(2021, 02, 02).and_hms(11, 00, 00),
+                    Utc
+                )).as_secs(),
+            "2w 6d 23h".secs()
+        );
+
+        assert_eq!(
+            every(4).weeks().on(Weekday::Tue).at(10, 00, 00).in_timezone(&Utc)
+                .time_to_sleep_at(&DateTime::from_utc(
+                    // 2'nd week in cycle, Tue
+                    NaiveDate::from_ymd(2021, 02, 02).and_hms(10, 00, 00),
+                    Utc
+                )).as_secs(),
+            "3w".secs()
+        );
+
+
+        assert_eq!(
+            every(4).weeks().on(Weekday::Wed).at(10, 00, 00).in_timezone(&Utc)
+                .time_to_sleep_at(&DateTime::from_utc(
+                    // 1st week in cycle, Tue
+                    NaiveDate::from_ymd(2021, 01, 26).and_hms(09, 00, 00),
+                    Utc
+                )).as_secs(),
+            "1d 1h".secs()
+        );
+
+        assert_eq!(
+            every(4).weeks().on(Weekday::Wed).at(10, 00, 00).in_timezone(&Utc)
+                .time_to_sleep_at(&DateTime::from_utc(
+                    // 1st week in cycle, Tue
+                    NaiveDate::from_ymd(2021, 01, 26).and_hms(11, 00, 00),
+                    Utc
+                )).as_secs(),
+            "23h".secs()
+        );
+
+        assert_eq!(
+            every(4).weeks().on(Weekday::Wed).at(10, 00, 00).in_timezone(&Utc)
+                .time_to_sleep_at(&DateTime::from_utc(
+                    // 1st week in cycle, Tue
+                    NaiveDate::from_ymd(2021, 01, 26).and_hms(10, 00, 00),
+                    Utc
+                )).as_secs(),
+            "1d".secs()
+        );
+
+        assert_eq!(
+            every(4).weeks().on(Weekday::Mon).at(10, 00, 00).in_timezone(&Utc)
+                .time_to_sleep_at(&DateTime::from_utc(
+                    // 1st week in cycle, Tue
+                    NaiveDate::from_ymd(2021, 01, 26).and_hms(09, 00, 00),
+                    Utc
+                )).as_secs(),
+            "3w 6d 1h".secs()
+        );
+
+        assert_eq!(
+            every(4).weeks().on(Weekday::Mon).at(10, 00, 00).in_timezone(&Utc)
+                .time_to_sleep_at(&DateTime::from_utc(
+                    // 1st week in cycle, Tue
+                    NaiveDate::from_ymd(2021, 01, 26).and_hms(11, 00, 00),
+                    Utc
+                )).as_secs(),
+            "3w 5d 23h".secs()
+        );
+
+        assert_eq!(
+            every(4).weeks().on(Weekday::Mon).at(10, 00, 00).in_timezone(&Utc)
+                .time_to_sleep_at(&DateTime::from_utc(
+                    // 1st week in cycle, Tue
+                    NaiveDate::from_ymd(2021, 01, 26).and_hms(10, 00, 00),
+                    Utc
+                )).as_secs(),
+            "3w 6d".secs()
+        );
+
+        assert_eq!(
+            every(4).weeks().on(Weekday::Tue).at(10, 00, 00).in_timezone(&Utc)
+                .time_to_sleep_at(&DateTime::from_utc(
+                    // 1st week in cycle, Tue
+                    NaiveDate::from_ymd(2021, 01, 26).and_hms(09, 00, 00),
+                    Utc
+                )).as_secs(),
+            "1h".secs()
+        );
+
+        assert_eq!(
+            every(4).weeks().on(Weekday::Tue).at(10, 00, 00).in_timezone(&Utc)
+                .time_to_sleep_at(&DateTime::from_utc(
+                    // 1st week in cycle, Tue
+                    NaiveDate::from_ymd(2021, 01, 26).and_hms(11, 00, 00),
+                    Utc
+                )).as_secs(),
+            "3w 6d 23h".secs()
+        );
+
+        assert_eq!(
+            every(4).weeks().on(Weekday::Tue).at(10, 00, 00).in_timezone(&Utc)
+                .time_to_sleep_at(&DateTime::from_utc(
+                    // 1st week in cycle, Tue
+                    NaiveDate::from_ymd(2021, 01, 26).and_hms(10, 00, 00),
+                    Utc
+                )).as_secs(),
+            "4w".secs()
         );
     }
 
@@ -699,21 +898,24 @@ mod tests {
     impl ParseToSecs for str {
         fn secs(&self) -> u64 {
             let re = Regex::new(
-                r#"(?:(\d)d)?\s*(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?"#
+                r#"(?:(\d)w)?\s*(?:(\d)d)?\s*(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?"#
             ).unwrap();
             let caps = re.captures(self).unwrap();
 
             let mut res = 0u64;
-            caps.get(1).map(|days| {
+            caps.get(1).map(|weeks| {
+                res += u64::from_str(weeks.as_str()).unwrap() * 7 * 24 * 60 * 60;
+            });
+            caps.get(2).map(|days| {
                 res += u64::from_str(days.as_str()).unwrap() * 24 * 60 * 60;
             });
-            caps.get(2).map(|hours| {
+            caps.get(3).map(|hours| {
                 res += u64::from_str(hours.as_str()).unwrap() * 60 * 60;
             });
-            caps.get(3).map(|minutes| {
+            caps.get(4).map(|minutes| {
                 res += u64::from_str(minutes.as_str()).unwrap() * 60;
             });
-            caps.get(4).map(|seconds| {
+            caps.get(5).map(|seconds| {
                 res += u64::from_str(seconds.as_str()).unwrap();
             });
 
