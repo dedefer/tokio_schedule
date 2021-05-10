@@ -9,7 +9,6 @@ keywords = ["async", "tokio", "schedule", "cron"]
 categories = ["asynchronous", "concurrency", "date-and-time"]
 repository = "https://github.com/dedefer/tokio_schedule"
 homepage = "https://github.com/dedefer/tokio_schedule"
-documentation = "https://docs.rs/tokio_schedule"
 description = "This crate helps schedule tasks in tokio runtime"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
