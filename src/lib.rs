@@ -125,7 +125,7 @@ pub trait Job: Sized + Sync {
             func().await;
         }};
 
-        Pin::from(Box::new(fut))
+        Box::pin(fut)
     }
 }
 
