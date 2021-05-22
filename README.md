@@ -15,7 +15,7 @@ It is built on tokio (version 1) and chrono lib
 
 ```rust
 use std::error::Error;
-use chrono::{Utc, Weekday};
+use chrono::{Utc, Duration, Weekday};
 use tokio::spawn;
 use tokio_schedule::{every, Job};
 
@@ -40,6 +40,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let every_hour = every(1).hour().at(10, 30).in_timezone(&Utc)
         .perform(|| async { println!("Every hour at :10:30") });
     spawn(every_hour);
+
+    let every_second_1_day = every(1).second().until(&(Utc::now() + Duration::days(1)))
+        .in_timezone(&Utc).perform(|| async { println!("Every second until next day") });
+    spawn(every_second_1_day);
 
     let every_day = every(1).day().at(10, 00, 00)
         .in_timezone(&Utc).perform(|| async { println!("I'm scheduled!") });

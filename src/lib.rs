@@ -7,7 +7,7 @@ It is built on tokio (version 1) and chrono lib
 
 ```rust
 use std::error::Error;
-use chrono::{Utc, Weekday};
+use chrono::{Utc, Duration, Weekday};
 use tokio::spawn;
 use tokio_schedule::{every, Job};
 
@@ -32,6 +32,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let every_hour = every(1).hour().at(10, 30).in_timezone(&Utc)
         .perform(|| async { println!("Every hour at :10:30") });
     spawn(every_hour);
+
+    let every_second_1_day = every(1).second().until(&(Utc::now() + Duration::days(1)))
+        .in_timezone(&Utc).perform(|| async { println!("Every second until next day") });
+    spawn(every_second_1_day);
 
     let every_day = every(1).day().at(10, 00, 00)
         .in_timezone(&Utc).perform(|| async { println!("I'm scheduled!") });
@@ -100,6 +104,7 @@ fn cyclic_time_to_sleep_at<TZ: TimeZone>(
 /// It provides method perform.
 pub trait Job: Sized + Sync {
     type TZ: TimeZone + Send + Sync;
+    type UntilTZ: TimeZone + Send + Sync;
 
     /// This method acts like time_to_sleep but with custom reference time
     fn time_to_sleep_at(&self, now: &DateTime<Self::TZ>) -> Duration;
@@ -107,9 +112,25 @@ pub trait Job: Sized + Sync {
     #[doc(hidden)]
     fn timezone(&self) -> &Self::TZ;
 
+    #[doc(hidden)]
+    fn get_until(&self) -> Option<&DateTime<Self::UntilTZ>>;
+
+    #[doc(hidden)]
+    fn time_to_sleep_at_until(&self, now: &DateTime<Self::TZ>) -> Option<Duration> {
+        let dur = self.time_to_sleep_at(now);
+        let next_run =
+            now.clone() + chrono::Duration::from_std(dur).unwrap();
+        match self.get_until() {
+            Some(until)
+                if next_run.naive_utc() <= until.naive_utc() => Some(dur),
+            Some(_) => None,
+            None => Some(dur),
+        }
+    }
+
     /// This method returns Duration from now to next job run
-    fn time_to_sleep(&self) -> Duration {
-        self.time_to_sleep_at(&tz_now(self.timezone()))
+    fn time_to_sleep(&self) -> Option<Duration> {
+        self.time_to_sleep_at_until(&tz_now(self.timezone()))
     }
 
     /// This method returns Future that cyclic performs the job
@@ -120,10 +141,12 @@ pub trait Job: Sized + Sync {
         Fut: Future<Output = ()> + Send + 'a,
         <Self::TZ as TimeZone>::Offset: Send + 'a,
     {
-        let fut = async move { loop {
-            sleep(self.time_to_sleep()).await;
-            func().await;
-        }};
+        let fut = async move {
+            while let Some(dur) = self.time_to_sleep() {
+                sleep(dur).await;
+                func().await;
+            }
+        };
 
         Box::pin(fut)
     }
@@ -140,52 +163,82 @@ pub struct Every {
 }
 
 impl Every {
-    pub fn second(self) -> EverySecond<Local> {
-        EverySecond { step: self.step, tz: Local }
+    pub fn second(self) -> EverySecond<Local, Local> {
+        EverySecond { step: self.step, tz: Local, until: None }
     }
-    pub fn seconds(self) -> EverySecond<Local> { self.second() }
+    pub fn seconds(self) -> EverySecond<Local, Local> { self.second() }
 
-    pub fn minute(self) -> EveryMinute<Local> {
-        EveryMinute { step: self.step, tz: Local }
+    pub fn minute(self) -> EveryMinute<Local, Local> {
+        EveryMinute {
+            step: self.step, tz: Local, until: None,
+            second: 00,
+        }
     }
-    pub fn minutes(self) -> EveryMinute<Local> { self.minute() }
+    pub fn minutes(self) -> EveryMinute<Local, Local> { self.minute() }
 
-    pub fn hour(self) -> EveryHour<Local> {
-        EveryHour { step: self.step, tz: Local }
+    pub fn hour(self) -> EveryHour<Local, Local> {
+        EveryHour {
+            step: self.step, tz: Local, until: None,
+            minute:00, second: 00,
+        }
     }
-    pub fn hours(self) -> EveryHour<Local> { self.hour() }
+    pub fn hours(self) -> EveryHour<Local, Local> { self.hour() }
 
-    pub fn day(self) -> EveryDay<Local> {
-        EveryDay { step: self.step, tz: Local }
+    pub fn day(self) -> EveryDay<Local, Local> {
+        EveryDay {
+            step: self.step, tz: Local, until: None,
+            hour: 00, minute: 00, second: 00,
+        }
     }
-    pub fn days(self) -> EveryDay<Local> { self.day() }
+    pub fn days(self) -> EveryDay<Local, Local> { self.day() }
 
-    pub fn week(self) -> EveryWeekDay<Local> {
-        EveryWeekDay { step: self.step, tz: Local, weekday: Weekday::Mon }
+    pub fn week(self) -> EveryWeekDay<Local, Local> {
+        EveryWeekDay {
+            step: self.step, tz: Local, until: None,
+            weekday: Weekday::Mon,
+            hour: 00, minute: 00, second: 00,
+        }
     }
-    pub fn weeks(self) -> EveryWeekDay<Local> { self.week() }
+    pub fn weeks(self) -> EveryWeekDay<Local, Local> { self.week() }
 }
 
 #[derive(Debug, Clone)]
-pub struct EverySecond<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
+pub struct EverySecond<TZ, UntilTZ>
+    where
+        TZ: Clone + TimeZone + Send + Sync,
+        UntilTZ: Clone + TimeZone + Send + Sync,
 {
     step: u32, // must be > 0
     tz: TZ,
+    until: Option<DateTime<UntilTZ>>,
 }
 
-impl<TZ> EverySecond<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
+impl<TZ, UntilTZ> EverySecond<TZ, UntilTZ>
+    where
+        TZ: Clone + TimeZone + Send + Sync,
+        UntilTZ: Clone + TimeZone + Send + Sync,
 {
-    pub fn in_timezone<NewTZ>(self, new_tz: &NewTZ) -> EverySecond<NewTZ>
+    pub fn until<NewUntilTZ>(self, dt: &DateTime<NewUntilTZ>) -> EverySecond<TZ, NewUntilTZ>
+        where NewUntilTZ: Clone + TimeZone + Send + Sync,
+    {
+        EverySecond { step: self.step, tz: self.tz, until: Some(dt.clone()) }
+    }
+
+    pub fn in_timezone<NewTZ>(self, new_tz: &NewTZ) -> EverySecond<NewTZ, UntilTZ>
         where NewTZ: Clone + TimeZone + Send + Sync,
-    { EverySecond { step: self.step, tz: new_tz.clone() } }
+    {
+        EverySecond { step: self.step, tz: new_tz.clone(), until: self.until }
+    }
 }
 
-impl<TZ> Job for EverySecond<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
+impl<TZ, UntilTZ> Job for EverySecond<TZ, UntilTZ>
+    where
+        TZ: Clone + TimeZone + Send + Sync,
+        UntilTZ: Clone + TimeZone + Send + Sync,
+        UntilTZ::Offset: Sync,
 {
     type TZ = TZ;
+    type UntilTZ = UntilTZ;
 
     fn time_to_sleep_at(&self, now: &DateTime<TZ>) -> Duration {
         // hack for leap second
@@ -200,299 +253,256 @@ impl<TZ> Job for EverySecond<TZ>
     }
 
     fn timezone(&self) -> &Self::TZ { &self.tz }
+
+    fn get_until(&self) -> Option<&DateTime<Self::UntilTZ>> { (&self.until).into() }
 }
 
 #[derive(Debug, Clone)]
-pub struct EveryMinute<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
+pub struct EveryMinute<TZ, UntilTZ>
+    where
+        TZ: Clone + TimeZone + Send + Sync,
+        UntilTZ: Clone + TimeZone + Send + Sync,
 {
     step: u32,
     tz: TZ,
-}
+    until: Option<DateTime<UntilTZ>>,
 
-impl<TZ> EveryMinute<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
-{
-    pub fn at(self, second: u32) -> EveryMinuteAt<TZ> {
-        EveryMinuteAt { minute: self, second }
-    }
-
-    pub fn in_timezone<NewTZ>(self, new_tz: &NewTZ) -> EveryMinute<NewTZ>
-        where NewTZ: Clone + TimeZone + Send + Sync,
-    { EveryMinute { step: self.step, tz: new_tz.clone() } }
-}
-
-impl<TZ> Job for EveryMinute<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
-{
-    type TZ = TZ;
-
-    fn time_to_sleep_at(&self, now: &DateTime<TZ>) -> Duration {
-        EveryMinuteAt {
-            minute: self.clone(),
-            second: 00,
-        }.time_to_sleep_at(now)
-    }
-
-    fn timezone(&self) -> &Self::TZ { &self.tz }
-}
-
-#[derive(Debug, Clone)]
-pub struct EveryMinuteAt<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
-{
-    minute: EveryMinute<TZ>,
     second: u32,
 }
 
-impl<TZ> EveryMinuteAt<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
+impl<TZ, UntilTZ> EveryMinute<TZ, UntilTZ>
+    where
+        TZ: Clone + TimeZone + Send + Sync,
+        UntilTZ: Clone + TimeZone + Send + Sync,
 {
-    pub fn in_timezone<NewTZ>(self, new_tz: &NewTZ) -> EveryMinuteAt<NewTZ>
+    pub fn at(self, second: u32) -> Self {
+        Self { second, ..self }
+    }
+
+    pub fn in_timezone<NewTZ>(self, new_tz: &NewTZ) -> EveryMinute<NewTZ, UntilTZ>
         where NewTZ: Clone + TimeZone + Send + Sync,
     {
-        EveryMinuteAt {
-            minute: self.minute.in_timezone(new_tz),
+        EveryMinute {
+            step: self.step, tz: new_tz.clone(), until: self.until,
+            second: self.second,
+        }
+    }
+
+    pub fn until<NewUntilTZ>(self, dt: &DateTime<NewUntilTZ>) -> EveryMinute<TZ, NewUntilTZ>
+        where NewUntilTZ: Clone + TimeZone + Send + Sync,
+    {
+        EveryMinute {
+            step: self.step, tz: self.tz, until: Some(dt.clone()),
             second: self.second,
         }
     }
 }
 
-impl<TZ> Job for EveryMinuteAt<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
+impl<TZ, UntilTZ> Job for EveryMinute<TZ, UntilTZ>
+    where
+        TZ: Clone + TimeZone + Send + Sync,
+        UntilTZ: Clone + TimeZone + Send + Sync,
+        UntilTZ::Offset: Sync,
 {
     type TZ = TZ;
+    type UntilTZ = UntilTZ;
 
     fn time_to_sleep_at(&self, now: &DateTime<TZ>) -> Duration {
         cyclic_time_to_sleep_at(
             now, (None, None, self.second),
-            (self.minute.step, now.minute(), 60),
+            (self.step, now.minute(), 60),
         )
     }
 
-    fn timezone(&self) -> &Self::TZ { &self.minute.tz }
+    fn timezone(&self) -> &Self::TZ { &self.tz }
+
+    fn get_until(&self) -> Option<&DateTime<Self::UntilTZ>> { (&self.until).into() }
 }
 
-#[derive(Debug, Clone)]
-pub struct EveryHour<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
+pub struct EveryHour<TZ, UntilTZ>
+    where
+        TZ: Clone + TimeZone + Send + Sync,
+        UntilTZ: Clone + TimeZone + Send + Sync,
 {
     step: u32,
     tz: TZ,
-}
+    until: Option<DateTime<UntilTZ>>,
 
-impl<TZ> EveryHour<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
-{
-    pub fn at(self, minute: u32, second: u32) -> EveryHourAt<TZ> {
-        EveryHourAt { hour: self, minute, second }
-    }
-
-    pub fn in_timezone<NewTZ>(self, new_tz: &NewTZ) -> EveryHour<NewTZ>
-        where NewTZ: Clone + TimeZone + Send + Sync,
-    { EveryHour { step: self.step, tz: new_tz.clone() } }
-}
-
-impl<TZ> Job for EveryHour<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
-{
-    type TZ = TZ;
-
-    fn time_to_sleep_at(&self, now: &DateTime<TZ>) -> Duration {
-        EveryHourAt {
-            hour: self.clone(),
-            minute: 00, second: 00,
-        }.time_to_sleep_at(now)
-    }
-
-    fn timezone(&self) -> &Self::TZ { &self.tz }
-}
-
-pub struct EveryHourAt<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
-{
-    hour: EveryHour<TZ>,
     minute: u32,
     second: u32,
 }
 
-impl<TZ> EveryHourAt<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
+impl<TZ, UntilTZ> EveryHour<TZ, UntilTZ>
+    where
+        TZ: Clone + TimeZone + Send + Sync,
+        UntilTZ: Clone + TimeZone + Send + Sync,
 {
-    pub fn in_timezone<NewTZ>(self, new_tz: &NewTZ) -> EveryHourAt<NewTZ>
+    pub fn at(self, minute: u32, second: u32) -> Self {
+        Self { minute, second, ..self }
+    }
+
+    pub fn in_timezone<NewTZ>(self, new_tz: &NewTZ) -> EveryHour<NewTZ, UntilTZ>
         where NewTZ: Clone + TimeZone + Send + Sync,
     {
-        EveryHourAt {
-            hour: self.hour.in_timezone(new_tz),
-            minute: self.minute,
-            second: self.second,
+        EveryHour {
+            step: self.step, tz: new_tz.clone(), until: self.until,
+            minute: self.minute, second: self.second,
+        }
+    }
+
+    pub fn until<NewUntilTZ>(self, dt: &DateTime<NewUntilTZ>) -> EveryHour<TZ, NewUntilTZ>
+        where NewUntilTZ: Clone + TimeZone + Send + Sync,
+    {
+        EveryHour {
+            step: self.step, tz: self.tz, until: Some(dt.clone()),
+            minute: self.minute, second: self.second,
         }
     }
 }
 
-impl<TZ> Job for EveryHourAt<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
+impl<TZ, UntilTZ> Job for EveryHour<TZ, UntilTZ>
+    where
+        TZ: Clone + TimeZone + Send + Sync,
+        UntilTZ: Clone + TimeZone + Send + Sync,
+        UntilTZ::Offset: Sync,
 {
     type TZ = TZ;
+    type UntilTZ = UntilTZ;
 
     fn time_to_sleep_at(&self, now: &DateTime<TZ>) -> Duration {
         cyclic_time_to_sleep_at(
             now, (None, Some(self.minute), self.second),
-            (self.hour.step, now.hour(), 60 * 60),
+            (self.step, now.hour(), 60 * 60),
         )
     }
 
-    fn timezone(&self) -> &Self::TZ { &self.hour.tz }
+    fn timezone(&self) -> &Self::TZ { &self.tz }
+
+    fn get_until(&self) -> Option<&DateTime<UntilTZ>> { (&self.until).into() }
 }
 
 #[derive(Debug, Clone)]
-pub struct EveryDay<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
+pub struct EveryDay<TZ, UntilTZ>
+    where
+        TZ: Clone + TimeZone + Send + Sync,
+        UntilTZ: Clone + TimeZone + Send + Sync,
 {
     step: u32,
     tz: TZ,
-}
+    until: Option<DateTime<UntilTZ>>,
 
-impl<TZ> EveryDay<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
-{
-    pub fn at(self, hour: u32, minute: u32, second: u32) -> EveryDayAt<TZ> {
-        EveryDayAt { day: self, hour, minute, second }
-    }
-
-    pub fn in_timezone<NewTZ>(self, new_tz: &NewTZ) -> EveryDay<NewTZ>
-        where NewTZ: Clone + TimeZone + Send + Sync,
-    { EveryDay { step: self.step, tz: new_tz.clone() } }
-}
-
-impl<TZ> Job for EveryDay<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
-{
-    type TZ = TZ;
-
-    fn time_to_sleep_at(&self, now: &DateTime<TZ>) -> Duration {
-        EveryDayAt {
-            day: self.clone(),
-            hour: 00, minute: 00, second: 00,
-        }.time_to_sleep_at(now)
-    }
-
-    fn timezone(&self) -> &Self::TZ { &self.tz }
-}
-
-#[derive(Debug, Clone)]
-pub struct EveryDayAt<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
-{
-    day: EveryDay<TZ>,
     hour: u32,
     minute: u32,
     second: u32,
 }
 
-impl<TZ> EveryDayAt<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
+impl<TZ, UntilTZ> EveryDay<TZ, UntilTZ>
+    where
+        TZ: Clone + TimeZone + Send + Sync,
+        UntilTZ: Clone + TimeZone + Send + Sync,
 {
-    pub fn in_timezone<NewTZ>(self, new_tz: &NewTZ) -> EveryDayAt<NewTZ>
+    pub fn at(self, hour: u32, minute: u32, second: u32) -> Self {
+        Self { hour, minute, second, ..self }
+    }
+
+    pub fn in_timezone<NewTZ>(self, new_tz: &NewTZ) -> EveryDay<NewTZ, UntilTZ>
         where NewTZ: Clone + TimeZone + Send + Sync,
     {
-        EveryDayAt {
-            day: self.day.in_timezone(new_tz),
-            hour: self.hour,
-            minute: self.minute,
-            second: self.second,
+        EveryDay {
+            step: self.step, tz: new_tz.clone(), until: self.until,
+            hour: self.hour, minute: self.minute, second: self.second,
+        }
+    }
+
+    pub fn until<NewUntilTZ>(self, dt: &DateTime<NewUntilTZ>) -> EveryDay<TZ, NewUntilTZ>
+        where NewUntilTZ: Clone + TimeZone + Send + Sync,
+    {
+        EveryDay {
+            step: self.step, tz: self.tz, until: Some(dt.clone()),
+            hour: self.hour, minute: self.minute, second: self.second,
         }
     }
 }
 
-impl<TZ> Job for EveryDayAt<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
+impl<TZ, UntilTZ> Job for EveryDay<TZ, UntilTZ>
+    where
+        TZ: Clone + TimeZone + Send + Sync,
+        UntilTZ: Clone + TimeZone + Send + Sync,
+        UntilTZ::Offset: Sync,
 {
     type TZ = TZ;
+    type UntilTZ = UntilTZ;
 
     fn time_to_sleep_at(&self, now: &DateTime<TZ>) -> Duration {
         cyclic_time_to_sleep_at(
             now, (Some(self.hour), Some(self.minute), self.second),
-            (self.day.step, now.day(), 24 * 60 * 60),
+            (self.step, now.day(), 24 * 60 * 60),
         )
     }
 
-    fn timezone(&self) -> &Self::TZ { &self.day.tz }
+    fn timezone(&self) -> &Self::TZ { &self.tz }
+
+    fn get_until(&self) -> Option<&DateTime<Self::UntilTZ>> { (&self.until).into() }
 }
 
 #[derive(Debug, Clone)]
-pub struct EveryWeekDay<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
+pub struct EveryWeekDay<TZ, UntilTZ>
+    where
+        TZ: Clone + TimeZone + Send + Sync,
+        UntilTZ: Clone + TimeZone + Send + Sync,
 {
     step: u32,
     weekday: Weekday,
     tz: TZ,
-}
+    until: Option<DateTime<UntilTZ>>,
 
-impl<TZ> EveryWeekDay<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
-{
-    pub fn at(self, hour: u32, minute: u32, second: u32) -> EveryWeekDayAt<TZ> {
-        EveryWeekDayAt { week: self, hour, minute, second }
-    }
-
-    pub fn on(self, weekday: Weekday) -> EveryWeekDay<TZ> {
-        EveryWeekDay { weekday, ..self }
-    }
-
-    pub fn in_timezone<NewTZ>(self, new_tz: &NewTZ) -> EveryWeekDay<NewTZ>
-        where NewTZ: Clone + TimeZone + Send + Sync,
-    { EveryWeekDay { step: self.step, weekday: self.weekday, tz: new_tz.clone() } }
-}
-
-impl<TZ> Job for EveryWeekDay<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
-{
-    type TZ = TZ;
-
-    fn time_to_sleep_at(&self, now: &DateTime<TZ>) -> Duration {
-        EveryWeekDayAt {
-            week: self.clone(),
-            hour: 00, minute: 00, second: 00,
-        }.time_to_sleep_at(now)
-    }
-
-    fn timezone(&self) -> &Self::TZ { &self.tz }
-}
-
-#[derive(Debug, Clone)]
-pub struct EveryWeekDayAt<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
-{
-    week: EveryWeekDay<TZ>,
     hour: u32,
     minute: u32,
     second: u32,
 }
 
-impl<TZ> EveryWeekDayAt<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
+impl<TZ, UntilTZ> EveryWeekDay<TZ, UntilTZ>
+    where
+        TZ: Clone + TimeZone + Send + Sync,
+        UntilTZ: Clone + TimeZone + Send + Sync,
 {
-    pub fn on(self, weekday: Weekday) -> EveryWeekDayAt<TZ> {
-        EveryWeekDayAt { week: self.week.on(weekday), ..self }
+    pub fn at(self, hour: u32, minute: u32, second: u32) -> Self {
+        Self { hour, minute, second, ..self }
     }
 
-    pub fn in_timezone<NewTZ>(self, new_tz: &NewTZ) -> EveryWeekDayAt<NewTZ>
+    pub fn on(self, weekday: Weekday) -> Self {
+        Self { weekday, ..self }
+    }
+
+    pub fn in_timezone<NewTZ>(self, new_tz: &NewTZ) -> EveryWeekDay<NewTZ, UntilTZ>
         where NewTZ: Clone + TimeZone + Send + Sync,
     {
-        EveryWeekDayAt {
-            week: self.week.in_timezone(new_tz),
-            hour: self.hour,
-            minute: self.minute,
-            second: self.second,
+        EveryWeekDay {
+            step: self.step, tz: new_tz.clone(), until: self.until,
+            weekday: self.weekday,
+            hour: self.hour, minute: self.minute, second: self.second,
+        }
+    }
+
+    pub fn until<NewUntilTZ>(self, dt: &DateTime<NewUntilTZ>) -> EveryWeekDay<TZ, NewUntilTZ>
+        where NewUntilTZ: Clone + TimeZone + Send + Sync,
+    {
+        EveryWeekDay {
+            step: self.step, tz: self.tz, until: Some(dt.clone()),
+            weekday: self.weekday,
+            hour: self.hour, minute: self.minute, second: self.second,
         }
     }
 }
 
-impl<TZ> Job for EveryWeekDayAt<TZ>
-    where TZ: Clone + TimeZone + Send + Sync,
+impl<TZ, UntilTZ> Job for EveryWeekDay<TZ, UntilTZ>
+    where
+        TZ: Clone + TimeZone + Send + Sync,
+        UntilTZ: Clone + TimeZone + Send + Sync,
+        UntilTZ::Offset: Sync,
 {
     type TZ = TZ;
+    type UntilTZ = UntilTZ;
 
     fn time_to_sleep_at(&self, now: &DateTime<TZ>) -> Duration {
         let offset_nanos = {
@@ -504,9 +514,9 @@ impl<TZ> Job for EveryWeekDayAt<TZ>
 
         let interval_nanos = {
             let current_week = now.iso_week().week();
-            let current_week_in_cycle = current_week % self.week.step;
+            let current_week_in_cycle = current_week % self.step;
             let skip_in_week =
-                self.week.weekday.number_from_monday() as i32 - now.weekday().number_from_monday() as i32;
+                self.weekday.number_from_monday() as i32 - now.weekday().number_from_monday() as i32;
 
             if
                 (skip_in_week > 0 && current_week_in_cycle > 0) ||
@@ -514,7 +524,7 @@ impl<TZ> Job for EveryWeekDayAt<TZ>
                     current_week_in_cycle == 0 && offset_nanos <= 0 || current_week_in_cycle > 0
                 )) || (skip_in_week < 0)
             {
-                skip_in_week + 7 * (self.week.step - current_week_in_cycle) as i32
+                skip_in_week + 7 * (self.step - current_week_in_cycle) as i32
             } else {
                 skip_in_week
             }
@@ -523,7 +533,9 @@ impl<TZ> Job for EveryWeekDayAt<TZ>
         Duration::from_nanos((interval_nanos + offset_nanos) as u64)
     }
 
-    fn timezone(&self) -> &Self::TZ { &self.week.tz }
+    fn timezone(&self) -> &Self::TZ { &self.tz }
+
+    fn get_until(&self) -> Option<&DateTime<Self::UntilTZ>> { (&self.until).into() }
 }
 
 #[cfg(test)]
@@ -540,13 +552,13 @@ mod tests {
     fn every_second() {
         assert_eq!(
             every(30).seconds().in_timezone(&Utc)
-                .time_to_sleep_at(&dt(10, 30, 10)).as_secs(),
+                .time_to_sleep_at_until(&dt(10, 30, 10)).unwrap().as_secs(),
             "20s".secs()
         );
 
         assert_eq!(
             every(30).seconds().in_timezone(&Utc)
-                .time_to_sleep_at(&dt(10, 30, 50)).as_secs(),
+                .time_to_sleep_at_until(&dt(10, 30, 50)).unwrap().as_secs(),
             "10s".secs()
         );
     }
@@ -555,37 +567,37 @@ mod tests {
     fn every_minute() {
         assert_eq!(
             every(30).minutes().at(20).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(10, 30, 10)).as_secs(),
+                .time_to_sleep_at_until(&dt(10, 30, 10)).unwrap().as_secs(),
             "10s".secs()
         );
 
         assert_eq!(
             every(30).minutes().at(20).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(10, 20, 10)).as_secs(),
+                .time_to_sleep_at_until(&dt(10, 20, 10)).unwrap().as_secs(),
             "10m 10s".secs()
         );
 
         assert_eq!(
             every(30).minutes().at(20).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(10, 20, 50)).as_secs(),
+                .time_to_sleep_at_until(&dt(10, 20, 50)).unwrap().as_secs(),
             "9m 30s".secs()
         );
 
         assert_eq!(
             every(1).minutes().at(20).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(10, 20, 10)).as_secs(),
+                .time_to_sleep_at_until(&dt(10, 20, 10)).unwrap().as_secs(),
             "10s".secs()
         );
 
         assert_eq!(
             every(1).minutes().at(20).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(10, 20, 30)).as_secs(),
+                .time_to_sleep_at_until(&dt(10, 20, 30)).unwrap().as_secs(),
             "50s".secs()
         );
 
         assert_eq!(
             every(1).minutes().at(20).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(10, 21, 20)).as_secs(),
+                .time_to_sleep_at_until(&dt(10, 21, 20)).unwrap().as_secs(),
             "1m".secs()
         );
     }
@@ -594,38 +606,38 @@ mod tests {
     fn every_hour() {
         assert_eq!(
             every(3).hours().at(10, 20).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(10, 30, 10)).as_secs(),
+                .time_to_sleep_at_until(&dt(10, 30, 10)).unwrap().as_secs(),
             "1h 40m 10s".secs()
         );
 
         assert_eq!(
             every(3).hours().at(10, 20).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(23, 20, 50)).as_secs(),
+                .time_to_sleep_at_until(&dt(23, 20, 50)).unwrap().as_secs(),
             "49m 30s".secs()
         );
 
         assert_eq!(
             every(3).hours().at(10, 20).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(10, 20, 50)).as_secs(),
+                .time_to_sleep_at_until(&dt(10, 20, 50)).unwrap().as_secs(),
             "1h 49m 30s".secs()
         );
 
 
         assert_eq!(
             every(3).hours().at(10, 20).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(12, 09, 10)).as_secs(),
+                .time_to_sleep_at_until(&dt(12, 09, 10)).unwrap().as_secs(),
             "1m 10s".secs()
         );
 
         assert_eq!(
             every(1).hours().at(10, 20).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(23, 05, 00)).as_secs(),
+                .time_to_sleep_at_until(&dt(23, 05, 00)).unwrap().as_secs(),
             "5m 20s".secs()
         );
 
         assert_eq!(
             every(1).hours().at(10, 20).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(00, 10, 20)).as_secs(),
+                .time_to_sleep_at_until(&dt(00, 10, 20)).unwrap().as_secs(),
             "1h".secs()
         );
     }
@@ -634,50 +646,50 @@ mod tests {
     fn every_day() {
         assert_eq!(
             every(2).days().at(10, 20, 20).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(10, 30, 10)).as_secs(),
+                .time_to_sleep_at_until(&dt(10, 30, 10)).unwrap().as_secs(),
             "23h 50m 10s".secs()
         );
 
         assert_eq!(
             every(2).days().at(10, 20, 20).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(23, 20, 50)).as_secs(),
+                .time_to_sleep_at_until(&dt(23, 20, 50)).unwrap().as_secs(),
             "10h 59m 30s".secs()
         );
 
         assert_eq!(
             every(1).day().in_timezone(&Utc)
-                .time_to_sleep_at(&dt(23, 20, 50)).as_secs(),
+                .time_to_sleep_at_until(&dt(23, 20, 50)).unwrap().as_secs(),
             "39m 10s".secs()
         );
 
         assert_eq!(
             every(1).day().at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(00, 00, 00)).as_secs(),
+                .time_to_sleep_at_until(&dt(00, 00, 00)).unwrap().as_secs(),
             "10h".secs()
         );
 
         assert_eq!(
             every(1).day().at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(11, 00, 00)).as_secs(),
+                .time_to_sleep_at_until(&dt(11, 00, 00)).unwrap().as_secs(),
             "23h".secs()
         );
 
         assert_eq!(
             every(1).day().at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(10, 00, 00)).as_secs(),
+                .time_to_sleep_at_until(&dt(10, 00, 00)).unwrap().as_secs(),
             "24h".secs()
         );
 
 
         assert_eq!(
             every(1).day().at(10, 10, 50).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(10, 09, 50)).as_secs(),
+                .time_to_sleep_at_until(&dt(10, 09, 50)).unwrap().as_secs(),
             "1m".secs()
         );
 
         assert_eq!(
             every(5).day().at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(11, 00, 00)).as_secs(),
+                .time_to_sleep_at_until(&dt(11, 00, 00)).unwrap().as_secs(),
             "1d 23h".secs()
         );
     }
@@ -686,210 +698,237 @@ mod tests {
     fn every_weekday() {
         assert_eq!(
             every(1).week().on(Weekday::Wed).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(00, 00, 01)).as_secs(),
+                .time_to_sleep_at_until(&dt(00, 00, 01)).unwrap().as_secs(),
             "6d 23h 59m 59s".secs()
         );
 
         assert_eq!(
             every(1).week().on(Weekday::Thu).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(10, 00, 00)).as_secs(),
+                .time_to_sleep_at_until(&dt(10, 00, 00)).unwrap().as_secs(),
             "1d".secs()
         );
 
         assert_eq!(
             every(1).week().on(Weekday::Wed).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(10, 00, 00)).as_secs(),
+                .time_to_sleep_at_until(&dt(10, 00, 00)).unwrap().as_secs(),
             "7d".secs()
         );
 
         assert_eq!(
             every(1).week().on(Weekday::Mon).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&dt(10, 00, 00)).as_secs(),
+                .time_to_sleep_at_until(&dt(10, 00, 00)).unwrap().as_secs(),
             "5d".secs()
         );
 
         assert_eq!(
             every(4).weeks().on(Weekday::Wed).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&DateTime::from_utc(
+                .time_to_sleep_at_until(&DateTime::from_utc(
                     // 2'nd week in cycle, Tue
                     NaiveDate::from_ymd(2021, 02, 02).and_hms(09, 00, 00),
                     Utc
-                )).as_secs(),
+                )).unwrap().as_secs(),
             "3w 1d 1h".secs()
         );
 
         assert_eq!(
             every(4).weeks().on(Weekday::Wed).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&DateTime::from_utc(
+                .time_to_sleep_at_until(&DateTime::from_utc(
                     // 2'nd week in cycle, Tue
                     NaiveDate::from_ymd(2021, 02, 02).and_hms(11, 00, 00),
                     Utc
-                )).as_secs(),
+                )).unwrap().as_secs(),
             "3w 23h".secs()
         );
 
         assert_eq!(
             every(4).weeks().on(Weekday::Wed).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&DateTime::from_utc(
+                .time_to_sleep_at_until(&DateTime::from_utc(
                     // 2'nd week in cycle, Tue
                     NaiveDate::from_ymd(2021, 02, 02).and_hms(10, 00, 00),
                     Utc
-                )).as_secs(),
+                )).unwrap().as_secs(),
             "3w 1d".secs()
         );
 
         assert_eq!(
             every(4).weeks().on(Weekday::Mon).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&DateTime::from_utc(
+                .time_to_sleep_at_until(&DateTime::from_utc(
                     // 2'nd week in cycle, Tue
                     NaiveDate::from_ymd(2021, 02, 02).and_hms(09, 00, 00),
                     Utc
-                )).as_secs(),
+                )).unwrap().as_secs(),
             "2w 6d 1h".secs()
         );
 
         assert_eq!(
             every(4).weeks().on(Weekday::Mon).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&DateTime::from_utc(
+                .time_to_sleep_at_until(&DateTime::from_utc(
                     // 2'nd week in cycle, Tue
                     NaiveDate::from_ymd(2021, 02, 02).and_hms(11, 00, 00),
                     Utc
-                )).as_secs(),
+                )).unwrap().as_secs(),
             "2w 5d 23h".secs()
         );
 
         assert_eq!(
             every(4).weeks().on(Weekday::Mon).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&DateTime::from_utc(
+                .time_to_sleep_at_until(&DateTime::from_utc(
                     // 2'nd week in cycle, Tue
                     NaiveDate::from_ymd(2021, 02, 02).and_hms(10, 00, 00),
                     Utc
-                )).as_secs(),
+                )).unwrap().as_secs(),
             "2w 6d".secs()
         );
 
         assert_eq!(
             every(4).weeks().on(Weekday::Tue).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&DateTime::from_utc(
+                .time_to_sleep_at_until(&DateTime::from_utc(
                     // 2'nd week in cycle, Tue
                     NaiveDate::from_ymd(2021, 02, 02).and_hms(09, 00, 00),
                     Utc
-                )).as_secs(),
+                )).unwrap().as_secs(),
             "3w 1h".secs()
         );
 
         assert_eq!(
             every(4).weeks().on(Weekday::Tue).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&DateTime::from_utc(
+                .time_to_sleep_at_until(&DateTime::from_utc(
                     // 2'nd week in cycle, Tue
                     NaiveDate::from_ymd(2021, 02, 02).and_hms(11, 00, 00),
                     Utc
-                )).as_secs(),
+                )).unwrap().as_secs(),
             "2w 6d 23h".secs()
         );
 
         assert_eq!(
             every(4).weeks().on(Weekday::Tue).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&DateTime::from_utc(
+                .time_to_sleep_at_until(&DateTime::from_utc(
                     // 2'nd week in cycle, Tue
                     NaiveDate::from_ymd(2021, 02, 02).and_hms(10, 00, 00),
                     Utc
-                )).as_secs(),
+                )).unwrap().as_secs(),
             "3w".secs()
         );
 
 
         assert_eq!(
             every(4).weeks().on(Weekday::Wed).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&DateTime::from_utc(
+                .time_to_sleep_at_until(&DateTime::from_utc(
                     // 1st week in cycle, Tue
                     NaiveDate::from_ymd(2021, 01, 26).and_hms(09, 00, 00),
                     Utc
-                )).as_secs(),
+                )).unwrap().as_secs(),
             "1d 1h".secs()
         );
 
         assert_eq!(
             every(4).weeks().on(Weekday::Wed).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&DateTime::from_utc(
+                .time_to_sleep_at_until(&DateTime::from_utc(
                     // 1st week in cycle, Tue
                     NaiveDate::from_ymd(2021, 01, 26).and_hms(11, 00, 00),
                     Utc
-                )).as_secs(),
+                )).unwrap().as_secs(),
             "23h".secs()
         );
 
         assert_eq!(
             every(4).weeks().on(Weekday::Wed).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&DateTime::from_utc(
+                .time_to_sleep_at_until(&DateTime::from_utc(
                     // 1st week in cycle, Tue
                     NaiveDate::from_ymd(2021, 01, 26).and_hms(10, 00, 00),
                     Utc
-                )).as_secs(),
+                )).unwrap().as_secs(),
             "1d".secs()
         );
 
         assert_eq!(
             every(4).weeks().on(Weekday::Mon).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&DateTime::from_utc(
+                .time_to_sleep_at_until(&DateTime::from_utc(
                     // 1st week in cycle, Tue
                     NaiveDate::from_ymd(2021, 01, 26).and_hms(09, 00, 00),
                     Utc
-                )).as_secs(),
+                )).unwrap().as_secs(),
             "3w 6d 1h".secs()
         );
 
         assert_eq!(
             every(4).weeks().on(Weekday::Mon).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&DateTime::from_utc(
+                .time_to_sleep_at_until(&DateTime::from_utc(
                     // 1st week in cycle, Tue
                     NaiveDate::from_ymd(2021, 01, 26).and_hms(11, 00, 00),
                     Utc
-                )).as_secs(),
+                )).unwrap().as_secs(),
             "3w 5d 23h".secs()
         );
 
         assert_eq!(
             every(4).weeks().on(Weekday::Mon).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&DateTime::from_utc(
+                .time_to_sleep_at_until(&DateTime::from_utc(
                     // 1st week in cycle, Tue
                     NaiveDate::from_ymd(2021, 01, 26).and_hms(10, 00, 00),
                     Utc
-                )).as_secs(),
+                )).unwrap().as_secs(),
             "3w 6d".secs()
         );
 
         assert_eq!(
             every(4).weeks().on(Weekday::Tue).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&DateTime::from_utc(
+                .time_to_sleep_at_until(&DateTime::from_utc(
                     // 1st week in cycle, Tue
                     NaiveDate::from_ymd(2021, 01, 26).and_hms(09, 00, 00),
                     Utc
-                )).as_secs(),
+                )).unwrap().as_secs(),
             "1h".secs()
         );
 
         assert_eq!(
             every(4).weeks().on(Weekday::Tue).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&DateTime::from_utc(
+                .time_to_sleep_at_until(&DateTime::from_utc(
                     // 1st week in cycle, Tue
                     NaiveDate::from_ymd(2021, 01, 26).and_hms(11, 00, 00),
                     Utc
-                )).as_secs(),
+                )).unwrap().as_secs(),
             "3w 6d 23h".secs()
         );
 
         assert_eq!(
             every(4).weeks().on(Weekday::Tue).at(10, 00, 00).in_timezone(&Utc)
-                .time_to_sleep_at(&DateTime::from_utc(
+                .time_to_sleep_at_until(&DateTime::from_utc(
                     // 1st week in cycle, Tue
                     NaiveDate::from_ymd(2021, 01, 26).and_hms(10, 00, 00),
                     Utc
-                )).as_secs(),
+                )).unwrap().as_secs(),
             "4w".secs()
         );
     }
 
+    #[test]
+    fn until() {
+        assert!(
+            every(30).seconds().until(&dt(10, 30, 09)).in_timezone(&Utc)
+                .time_to_sleep_at_until(&dt(10, 30, 10)).is_none()
+        );
+
+        assert!(
+            every(30).minutes().at(20).until(&dt(10, 30, 09)).in_timezone(&Utc)
+                .time_to_sleep_at_until(&dt(10, 30, 10)).is_none()
+        );
+
+        assert!(
+            every(3).hours().at(10, 20).until(&dt(10, 30, 09)).in_timezone(&Utc)
+                .time_to_sleep_at_until(&dt(10, 30, 10)).is_none()
+        );
+
+        assert!(
+            every(2).days().at(10, 20, 20).until(&dt(10, 30, 09)).in_timezone(&Utc)
+                .time_to_sleep_at_until(&dt(10, 30, 10)).is_none()
+        );
+
+        assert!(
+            every(1).week().on(Weekday::Wed).until(&dt(00, 00, 00)).in_timezone(&Utc)
+                .time_to_sleep_at_until(&dt(00, 00, 01)).is_none()
+        );
+    }
 
     trait ParseToSecs {
         fn secs(&self) -> u64;
