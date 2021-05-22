@@ -1,6 +1,6 @@
 [package]
 name = "tokio_schedule"
-version = "0.2.1"
+version = "0.3.0"
 authors = ["dedefer <ddf1998@gmail.com>"]
 edition = "2018"
 readme = "README.md"
