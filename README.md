@@ -1,3 +1,8 @@
+![MIT licensed](https://img.shields.io/github/license/dedefer/tokio_schedule?style=for-the-badge)
+[![Version](https://img.shields.io/crates/v/tokio_schedule?style=for-the-badge)](https://crates.io/crates/tokio_schedule/)
+![Code Coverage](https://img.shields.io/coveralls/github/dedefer/tokio_schedule/main?style=for-the-badge)
+![Downloads](https://img.shields.io/crates/d/tokio_schedule?style=for-the-badge)
+
 This crate provides a library for scheduling periodic tasks.
 It is inspired by python's [schedule](https://pypi.org/project/schedule/) lib and provides similar API.
 It is built on tokio (version 1) and chrono lib
