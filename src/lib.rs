@@ -158,7 +158,7 @@ pub trait Job: Sized + Sync {
         F: FnMut(C) -> Fut + Send + 'a,
         Fut: Future<Output = ()> + Send + 'a,
         <Self::TZ as TimeZone>::Offset: Send + 'a,
-        C: Clone,
+        C: Clone + Send + Sync + 'a,
     {
         let fut = async move {
             while let Some(dur) = self.time_to_sleep() {
