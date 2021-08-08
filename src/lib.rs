@@ -152,7 +152,7 @@ pub trait Job: Sized + Sync {
     }
     
     /// This method returns Future that cyclic performs the job
-    fn perform_with_context<'a, F, C, Fut>(self, context: Option<C>, mut func: F) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>
+    fn perform_with_context<'a, F, C, Fut>(self, context: C, mut func: F) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>
     where
         Self: Send + 'a,
         F: FnMut() -> Fut + Send + 'a,
