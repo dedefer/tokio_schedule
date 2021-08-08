@@ -155,7 +155,7 @@ pub trait Job: Sized + Sync {
     fn perform_with_context<'a, F, C, Fut>(self, context: C, mut func: F) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>
     where
         Self: Send + 'a,
-        F: FnMut() -> Fut + Send + 'a,
+        F: FnMut(C) -> Fut + Send + 'a,
         Fut: Future<Output = ()> + Send + 'a,
         <Self::TZ as TimeZone>::Offset: Send + 'a,
         C: Clone,
