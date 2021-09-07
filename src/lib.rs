@@ -150,6 +150,25 @@ pub trait Job: Sized + Sync {
 
         Box::pin(fut)
     }
+    
+    /// This method returns Future that cyclic performs the job
+    fn perform_with_context<'a, F, C, Fut>(self, context: C, mut func: F) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>
+    where
+        Self: Send + 'a,
+        F: FnMut(C) -> Fut + Send + 'a,
+        Fut: Future<Output = ()> + Send + 'a,
+        <Self::TZ as TimeZone>::Offset: Send + 'a,
+        C: Clone + Send + Sync + 'a,
+    {
+        let fut = async move {
+            while let Some(dur) = self.time_to_sleep() {
+                sleep(dur).await;
+                func(context.clone()).await;
+            }
+        };
+
+        Box::pin(fut)
+    }
 }
 
 /// This function creates Every struct.
