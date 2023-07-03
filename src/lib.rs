@@ -319,9 +319,6 @@ where
         // calculate in nanoseconds
         let now_nanos = now.second() as u64 * 1_000_000_000 + now.nanosecond() as u64;
 
-        println!("now_nanos: {:?}", now_nanos);
-        println!("step nanos: {:?}", self.step);
-
         let nanoseconds = match self.step {
             step_nanos if step_nanos > 0u64 => step_nanos - now_nanos % step_nanos,
             _ => 0,
